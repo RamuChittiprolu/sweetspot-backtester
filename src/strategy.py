@@ -33,6 +33,7 @@ TSL_TRIGGER = 40.0
 TSL_CLOSE_OFFSET = 20.0
 MAX_LOSING_TRADES_PER_DAY = 3
 DAILY_STOP_LOSS = -50.0
+ANTI_CHASE_MAX_ENTRY_CANDLE_RANGE = 15.0
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,23 @@ class Trade:
     entry_near_ema20_5pts: bool
     entry_near_ema20_10pts: bool
     entry_near_ema20_15pts: bool
+    entry_candle_high: float
+    entry_candle_low: float
+    entry_candle_range: float
+    anti_chase_pass: bool
+
+
+@dataclass(frozen=True)
+class SkippedAntiChase:
+    date: str
+    symbol: str
+    side: str
+    entry_time: str
+    entry_price: float
+    entry_candle_high: float
+    entry_candle_low: float
+    entry_candle_range: float
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -79,6 +97,7 @@ class StrategyConfig:
     daily_stop_loss: float = DAILY_STOP_LOSS
     require_entry_candle_touches_ema20: bool = False
     entry_mode: str = "immediate"
+    max_entry_candle_range: float | None = ANTI_CHASE_MAX_ENTRY_CANDLE_RANGE
 
 
 @dataclass
@@ -101,6 +120,10 @@ class ActiveTrade:
     entry_near_ema20_5pts: bool = False
     entry_near_ema20_10pts: bool = False
     entry_near_ema20_15pts: bool = False
+    entry_candle_high: float = 0.0
+    entry_candle_low: float = 0.0
+    entry_candle_range: float = 0.0
+    anti_chase_pass: bool = True
 
 
 def _trade_date_rows(candles: pd.DataFrame, trade_date: pd.Timestamp) -> pd.DataFrame:
@@ -130,6 +153,16 @@ def _candle_color(row: pd.Series) -> str:
     if close < open_:
         return "red"
     return "doji"
+
+
+def _candle_range(row: pd.Series) -> float:
+    return _price(row["high"]) - _price(row["low"])
+
+
+def _anti_chase_passes(row: pd.Series, config: StrategyConfig) -> bool:
+    if config.max_entry_candle_range is None:
+        return True
+    return _candle_range(row) <= config.max_entry_candle_range
 
 
 def _active_stop(trade: ActiveTrade, config: StrategyConfig) -> float:
@@ -180,6 +213,10 @@ def _make_trade(
         entry_near_ema20_5pts=active.entry_near_ema20_5pts,
         entry_near_ema20_10pts=active.entry_near_ema20_10pts,
         entry_near_ema20_15pts=active.entry_near_ema20_15pts,
+        entry_candle_high=active.entry_candle_high,
+        entry_candle_low=active.entry_candle_low,
+        entry_candle_range=active.entry_candle_range,
+        anti_chase_pass=active.anti_chase_pass,
     )
 
 
@@ -194,7 +231,11 @@ def _premium_filter_passes(close: float, pivot: float, config: StrategyConfig) -
     return close >= config.min_premium
 
 
-def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+def _entry_candidate_before_anti_chase(
+    row: pd.Series,
+    pivot: float,
+    config: StrategyConfig,
+) -> bool:
     close = _price(row["close"])
     return (
         _premium_filter_passes(close, pivot, config)
@@ -207,14 +248,59 @@ def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bo
     )
 
 
+def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+    return _entry_candidate_before_anti_chase(row, pivot, config) and _anti_chase_passes(
+        row,
+        config,
+    )
+
+
 def _breakout_candidate(row: pd.Series, pivot: float) -> bool:
     return _price(row["close"]) > pivot
 
 
-def _retest_entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+def _retest_entry_candidate_before_anti_chase(
+    row: pd.Series,
+    pivot: float,
+    config: StrategyConfig,
+) -> bool:
     return (
-        _entry_candidate(row, pivot, config)
+        _entry_candidate_before_anti_chase(row, pivot, config)
         and _price(row["low"]) <= pivot <= _price(row["high"])
+    )
+
+
+def _retest_entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+    return _retest_entry_candidate_before_anti_chase(
+        row,
+        pivot,
+        config,
+    ) and _anti_chase_passes(row, config)
+
+
+def _symbol(pair: PairedSession, side: str) -> str:
+    return f"NIFTY_{pair.trade_date.date().isoformat()}_{pair.strike}{side}"
+
+
+def _skipped_anti_chase(
+    pair: PairedSession,
+    side: str,
+    row: pd.Series,
+) -> SkippedAntiChase:
+    entry_price = _price(row["close"])
+    high = _price(row["high"])
+    low = _price(row["low"])
+    candle_range = high - low
+    return SkippedAntiChase(
+        date=pair.trade_date.date().isoformat(),
+        symbol=_symbol(pair, side),
+        side=side,
+        entry_time=_timestamp(row["datetime"]),
+        entry_price=entry_price,
+        entry_candle_high=high,
+        entry_candle_low=low,
+        entry_candle_range=candle_range,
+        reason="entry_candle_range_gt_15",
     )
 
 
@@ -228,6 +314,9 @@ def _new_active_trade(
     entry_time = row["datetime"]
     entry_ema20 = _price(row["ema20"])
     distance_from_ema20 = entry_price - entry_ema20
+    entry_candle_high = _price(row["high"])
+    entry_candle_low = _price(row["low"])
+    entry_candle_range = entry_candle_high - entry_candle_low
     return ActiveTrade(
         side=side,
         entry_time=entry_time,
@@ -243,6 +332,10 @@ def _new_active_trade(
         entry_near_ema20_5pts=abs(distance_from_ema20) <= 5,
         entry_near_ema20_10pts=abs(distance_from_ema20) <= 10,
         entry_near_ema20_15pts=abs(distance_from_ema20) <= 15,
+        entry_candle_high=entry_candle_high,
+        entry_candle_low=entry_candle_low,
+        entry_candle_range=entry_candle_range,
+        anti_chase_pass=_anti_chase_passes(row, config),
     )
 
 
@@ -264,6 +357,7 @@ def _update_active_trade(active: ActiveTrade, row: pd.Series, config: StrategyCo
 def run_strategy_for_pair(
     pair: PairedSession,
     config: StrategyConfig | None = None,
+    skipped_anti_chase: list[SkippedAntiChase] | None = None,
 ) -> list[Trade]:
     config = config or StrategyConfig()
     if pair.pivot is None or pd.isna(pair.pivot):
@@ -333,10 +427,23 @@ def run_strategy_for_pair(
             if config.entry_mode == "retest_only":
                 if breakout_seen[side] and _retest_entry_candidate(row, pivot, config):
                     candidates.append((row["datetime"], side, row))
+                elif (
+                    breakout_seen[side]
+                    and _retest_entry_candidate_before_anti_chase(row, pivot, config)
+                    and not _anti_chase_passes(row, config)
+                ):
+                    if skipped_anti_chase is not None:
+                        skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
                 elif not breakout_seen[side] and _breakout_candidate(row, pivot):
                     breakout_seen[side] = True
             elif _entry_candidate(row, pivot, config):
                 candidates.append((row["datetime"], side, row))
+            elif (
+                _entry_candidate_before_anti_chase(row, pivot, config)
+                and not _anti_chase_passes(row, config)
+            ):
+                if skipped_anti_chase is not None:
+                    skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
 
         if candidates:
             _, side, row = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
@@ -366,15 +473,26 @@ def run_strategy_for_pair(
 def run_strategy_for_pairs(
     pairs: list[PairedSession],
     config: StrategyConfig | None = None,
+    skipped_anti_chase: list[SkippedAntiChase] | None = None,
 ) -> list[Trade]:
     trades: list[Trade] = []
     for pair in pairs:
-        trades.extend(run_strategy_for_pair(pair, config=config))
+        trades.extend(
+            run_strategy_for_pair(
+                pair,
+                config=config,
+                skipped_anti_chase=skipped_anti_chase,
+            )
+        )
     return trades
 
 
 def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
     return pd.DataFrame([asdict(trade) for trade in trades])
+
+
+def skipped_anti_chase_to_dataframe(skipped: list[SkippedAntiChase]) -> pd.DataFrame:
+    return pd.DataFrame([asdict(row) for row in skipped])
 
 
 def _parse_scalar(raw_value: str) -> Any:
