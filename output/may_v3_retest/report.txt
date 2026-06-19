@@ -1,0 +1,14 @@
+Sweet Spot Backtest Report
+==========================
+Config: C:\Users\rajan\Documents\sweetspot_backtester\configs\v3_retest_only.yaml
+
+Trading days: 18
+Trades: 36
+Wins: 11
+Losses: 24
+Win rate: 30.56%
+Total P&L: 79.90
+Average P&L per trade: 2.22
+Best day: 210.50
+Worst day: -86.50
+Max drawdown: -165.90

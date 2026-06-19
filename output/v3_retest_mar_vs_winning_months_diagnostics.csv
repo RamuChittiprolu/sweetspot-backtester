@@ -1,0 +1,3 @@
+group,days,trades,stops,stop_rate,avg_trades_day,avg_stops_day,avg_mfe,avg_mae,total_pnl,losing_days
+Mar,13,25,24,0.96,1.92,1.85,34.77,-22.53,-134.85,9
+Apr-May-Jun,43,89,79,0.89,2.07,1.84,36.97,-16.94,312.5,20
