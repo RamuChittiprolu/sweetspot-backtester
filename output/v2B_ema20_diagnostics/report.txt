@@ -11,4 +11,3 @@ Total P&L: 105.40
 Average P&L per trade: 3.19
 Best day: 92.30
 Worst day: -55.60
-Max drawdown: -119.90

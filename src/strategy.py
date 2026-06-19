@@ -53,6 +53,15 @@ class Trade:
     plus40_hit: bool
     loss_count_after_trade: int
     daily_pnl_after_trade: float
+    entry_ema20: float
+    entry_above_ema20: bool
+    distance_from_ema20: float
+    previous_candle_touched_ema20: bool
+    current_candle_touched_ema20: bool
+    entry_candle_color: str
+    entry_near_ema20_5pts: bool
+    entry_near_ema20_10pts: bool
+    entry_near_ema20_15pts: bool
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,8 @@ class StrategyConfig:
     tsl_close_offset: float = TSL_CLOSE_OFFSET
     max_losing_trades_per_day: int = MAX_LOSING_TRADES_PER_DAY
     daily_stop_loss: float = DAILY_STOP_LOSS
+    require_entry_candle_touches_ema20: bool = False
+    entry_mode: str = "immediate"
 
 
 @dataclass
@@ -81,6 +92,15 @@ class ActiveTrade:
     mae: float = 0.0
     plus20_hit: bool = False
     plus40_hit: bool = False
+    entry_ema20: float = 0.0
+    entry_above_ema20: bool = False
+    distance_from_ema20: float = 0.0
+    previous_candle_touched_ema20: bool = False
+    current_candle_touched_ema20: bool = False
+    entry_candle_color: str = "doji"
+    entry_near_ema20_5pts: bool = False
+    entry_near_ema20_10pts: bool = False
+    entry_near_ema20_15pts: bool = False
 
 
 def _trade_date_rows(candles: pd.DataFrame, trade_date: pd.Timestamp) -> pd.DataFrame:
@@ -94,6 +114,22 @@ def _timestamp(value: pd.Timestamp) -> str:
 
 def _price(value: object) -> float:
     return float(value)
+
+
+def _candle_touched_ema20(row: pd.Series | None) -> bool:
+    if row is None or pd.isna(row["ema20"]):
+        return False
+    return _price(row["low"]) <= _price(row["ema20"]) <= _price(row["high"])
+
+
+def _candle_color(row: pd.Series) -> str:
+    close = _price(row["close"])
+    open_ = _price(row["open"])
+    if close > open_:
+        return "green"
+    if close < open_:
+        return "red"
+    return "doji"
 
 
 def _active_stop(trade: ActiveTrade, config: StrategyConfig) -> float:
@@ -135,6 +171,15 @@ def _make_trade(
         plus40_hit=active.plus40_hit,
         loss_count_after_trade=loss_count_after_trade,
         daily_pnl_after_trade=daily_pnl_after_trade,
+        entry_ema20=active.entry_ema20,
+        entry_above_ema20=active.entry_above_ema20,
+        distance_from_ema20=active.distance_from_ema20,
+        previous_candle_touched_ema20=active.previous_candle_touched_ema20,
+        current_candle_touched_ema20=active.current_candle_touched_ema20,
+        entry_candle_color=active.entry_candle_color,
+        entry_near_ema20_5pts=active.entry_near_ema20_5pts,
+        entry_near_ema20_10pts=active.entry_near_ema20_10pts,
+        entry_near_ema20_15pts=active.entry_near_ema20_15pts,
     )
 
 
@@ -155,18 +200,49 @@ def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bo
         _premium_filter_passes(close, pivot, config)
         and close > pivot
         and close <= pivot + config.max_entry_above_pivot
+        and (
+            not config.require_entry_candle_touches_ema20
+            or _candle_touched_ema20(row)
+        )
     )
 
 
-def _new_active_trade(side: str, row: pd.Series, config: StrategyConfig) -> ActiveTrade:
+def _breakout_candidate(row: pd.Series, pivot: float) -> bool:
+    return _price(row["close"]) > pivot
+
+
+def _retest_entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+    return (
+        _entry_candidate(row, pivot, config)
+        and _price(row["low"]) <= pivot <= _price(row["high"])
+    )
+
+
+def _new_active_trade(
+    side: str,
+    row: pd.Series,
+    previous_row: pd.Series | None,
+    config: StrategyConfig,
+) -> ActiveTrade:
     entry_price = _price(row["close"])
     entry_time = row["datetime"]
+    entry_ema20 = _price(row["ema20"])
+    distance_from_ema20 = entry_price - entry_ema20
     return ActiveTrade(
         side=side,
         entry_time=entry_time,
         entry_price=entry_price,
         hard_sl=entry_price - config.hard_sl_points,
         highest_close=entry_price,
+        entry_ema20=entry_ema20,
+        entry_above_ema20=entry_price > entry_ema20,
+        distance_from_ema20=distance_from_ema20,
+        previous_candle_touched_ema20=_candle_touched_ema20(previous_row),
+        current_candle_touched_ema20=_candle_touched_ema20(row),
+        entry_candle_color=_candle_color(row),
+        entry_near_ema20_5pts=abs(distance_from_ema20) <= 5,
+        entry_near_ema20_10pts=abs(distance_from_ema20) <= 10,
+        entry_near_ema20_15pts=abs(distance_from_ema20) <= 15,
     )
 
 
@@ -198,9 +274,13 @@ def run_strategy_for_pair(
     pe_rows = _trade_date_rows(pair.pe, pair.trade_date)
 
     by_time: dict[pd.Timestamp, dict[str, pd.Series]] = {}
+    previous_by_time: dict[pd.Timestamp, dict[str, pd.Series | None]] = {}
     for side, rows in (("CE", ce_rows), ("PE", pe_rows)):
+        previous_row: pd.Series | None = None
         for _, row in rows.iterrows():
             by_time.setdefault(row["datetime"], {})[side] = row
+            previous_by_time.setdefault(row["datetime"], {})[side] = previous_row
+            previous_row = row
 
     trades: list[Trade] = []
     active: ActiveTrade | None = None
@@ -208,6 +288,7 @@ def run_strategy_for_pair(
     daily_pnl = 0.0
     stop_trading = False
     last_row_by_side: dict[str, pd.Series] = {}
+    breakout_seen = {"CE": False, "PE": False}
 
     for candle_time in sorted(by_time):
         side_rows = by_time[candle_time]
@@ -247,12 +328,21 @@ def run_strategy_for_pair(
         candidates = []
         for side in ("CE", "PE"):
             row = side_rows.get(side)
-            if row is not None and _entry_candidate(row, pivot, config):
+            if row is None:
+                continue
+            if config.entry_mode == "retest_only":
+                if breakout_seen[side] and _retest_entry_candidate(row, pivot, config):
+                    candidates.append((row["datetime"], side, row))
+                elif not breakout_seen[side] and _breakout_candidate(row, pivot):
+                    breakout_seen[side] = True
+            elif _entry_candidate(row, pivot, config):
                 candidates.append((row["datetime"], side, row))
 
         if candidates:
             _, side, row = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
-            active = _new_active_trade(side, row, config)
+            previous_row = previous_by_time.get(row["datetime"], {}).get(side)
+            active = _new_active_trade(side, row, previous_row, config)
+            breakout_seen = {"CE": False, "PE": False}
 
     if active is not None:
         exit_row = last_row_by_side.get(active.side)

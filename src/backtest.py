@@ -42,6 +42,14 @@ def build_daily_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
     return daily[DAILY_COLUMNS]
 
 
+def calculate_max_drawdown(pnl: pd.Series) -> float:
+    if pnl.empty:
+        return 0.0
+    equity = pnl.cumsum()
+    drawdown = equity - equity.cummax()
+    return float(drawdown.min())
+
+
 def build_report(config_path: Path, trades_df: pd.DataFrame, daily_df: pd.DataFrame) -> str:
     total_pnl = float(trades_df["pnl"].sum()) if not trades_df.empty else 0.0
     trades = len(trades_df)
@@ -51,6 +59,7 @@ def build_report(config_path: Path, trades_df: pd.DataFrame, daily_df: pd.DataFr
     avg_pnl = (total_pnl / trades) if trades else 0.0
     best_day = float(daily_df["day_pnl"].max()) if not daily_df.empty else 0.0
     worst_day = float(daily_df["day_pnl"].min()) if not daily_df.empty else 0.0
+    max_drawdown = calculate_max_drawdown(trades_df["pnl"]) if not trades_df.empty else 0.0
 
     lines = [
         "Sweet Spot Backtest Report",
@@ -66,11 +75,88 @@ def build_report(config_path: Path, trades_df: pd.DataFrame, daily_df: pd.DataFr
         f"Average P&L per trade: {avg_pnl:.2f}",
         f"Best day: {best_day:.2f}",
         f"Worst day: {worst_day:.2f}",
+        f"Max drawdown: {max_drawdown:.2f}",
     ]
     return "\n".join(lines) + "\n"
 
 
-def run_backtest(config_path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, str, Path]:
+def _summary_rows_for_bool(
+    trades_df: pd.DataFrame,
+    analysis: str,
+    column: str,
+) -> list[dict[str, object]]:
+    rows = []
+    for value in (True, False):
+        subset = trades_df[trades_df[column] == value]
+        rows.append(
+            {
+                "analysis": analysis,
+                "bucket": str(value),
+                "trades": len(subset),
+                "total_pnl": float(subset["pnl"].sum()) if not subset.empty else 0.0,
+            }
+        )
+    return rows
+
+
+def build_ema20_diagnostics_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["analysis", "bucket", "trades", "total_pnl"]
+    if trades_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    rows.extend(_summary_rows_for_bool(trades_df, "entry_above_ema20", "entry_above_ema20"))
+
+    for color, subset in trades_df.groupby("entry_candle_color", sort=True):
+        rows.append(
+            {
+                "analysis": "entry_candle_color",
+                "bucket": color,
+                "trades": len(subset),
+                "total_pnl": float(subset["pnl"].sum()),
+            }
+        )
+
+    rows.extend(
+        _summary_rows_for_bool(
+            trades_df,
+            "previous_candle_touched_ema20",
+            "previous_candle_touched_ema20",
+        )
+    )
+    rows.extend(
+        _summary_rows_for_bool(
+            trades_df,
+            "current_candle_touched_ema20",
+            "current_candle_touched_ema20",
+        )
+    )
+
+    distance = trades_df["distance_from_ema20"].abs()
+    near_buckets = [
+        ("within 5 pts", distance <= 5),
+        ("within 10 pts", (distance > 5) & (distance <= 10)),
+        ("within 15 pts", (distance > 10) & (distance <= 15)),
+        ("beyond 15 pts", distance > 15),
+    ]
+    for bucket, mask in near_buckets:
+        subset = trades_df[mask]
+        rows.append(
+            {
+                "analysis": "near_ema20_bucket",
+                "bucket": bucket,
+                "trades": len(subset),
+                "total_pnl": float(subset["pnl"].sum()) if not subset.empty else 0.0,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def run_backtest(
+    config_path: str | Path,
+    output_name: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, str, Path]:
     config_path = Path(config_path)
     config = load_strategy_config(config_path)
 
@@ -86,10 +172,14 @@ def run_backtest(config_path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, s
     daily_df = build_daily_summary(trades_df)
     report = build_report(config_path, trades_df, daily_df)
 
-    output_dir = Path(PROJECT_ROOT) / "output" / config.name
+    output_dir = Path(PROJECT_ROOT) / "output" / (output_name or config.name)
     output_dir.mkdir(parents=True, exist_ok=True)
     trades_df.to_csv(output_dir / "trades.csv", index=False)
     daily_df.to_csv(output_dir / "daily_summary.csv", index=False)
+    build_ema20_diagnostics_summary(trades_df).to_csv(
+        output_dir / "ema20_diagnostics_summary.csv",
+        index=False,
+    )
     (output_dir / "report.txt").write_text(report)
 
     return trades_df, daily_df, report, output_dir
@@ -98,15 +188,17 @@ def run_backtest(config_path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, s
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a Sweet Spot strategy backtest.")
     parser.add_argument("--config", required=True, help="Path to strategy YAML config.")
+    parser.add_argument("--output-name", help="Optional output folder name under output/.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    trades_df, daily_df, report, output_dir = run_backtest(args.config)
+    trades_df, daily_df, report, output_dir = run_backtest(args.config, args.output_name)
     print(report)
     print(f"Saved trades: {output_dir / 'trades.csv'}")
     print(f"Saved daily summary: {output_dir / 'daily_summary.csv'}")
+    print(f"Saved EMA20 diagnostics: {output_dir / 'ema20_diagnostics_summary.csv'}")
     print(f"Saved report: {output_dir / 'report.txt'}")
     print(f"Trades generated: {len(trades_df)}")
     print(f"Trading days: {len(daily_df)}")
