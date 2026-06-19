@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+try:
+    from .loader import (
+        PROJECT_ROOT,
+        PairedSession,
+        build_paired_sessions,
+        extract_zip,
+        load_option_sessions,
+    )
+except ImportError:
+    from loader import (
+        PROJECT_ROOT,
+        PairedSession,
+        build_paired_sessions,
+        extract_zip,
+        load_option_sessions,
+    )
+
+
+ENTRY_START_TIME = "09:20"
+MIN_CONTRACT_CLOSE = 120.0
+MAX_ENTRY_ABOVE_PIVOT = 20.0
+HARD_SL_POINTS = 15.0
+COST_SL_TRIGGER = 20.0
+TSL_TRIGGER = 40.0
+TSL_CLOSE_OFFSET = 20.0
+MAX_LOSING_TRADES_PER_DAY = 3
+DAILY_STOP_LOSS = -50.0
+
+
+@dataclass(frozen=True)
+class Trade:
+    trade_date: str
+    strike: int
+    side: str
+    entry_time: str
+    entry_price: float
+    exit_time: str
+    exit_price: float
+    pnl: float
+    exit_reason: str
+    pivot: float
+    mfe: float
+    mae: float
+    plus20_hit: bool
+    plus40_hit: bool
+    loss_count_after_trade: int
+    daily_pnl_after_trade: float
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    name: str = "v2"
+    entry_start_time: str = ENTRY_START_TIME
+    min_premium: float | None = MIN_CONTRACT_CLOSE
+    apply_premium_filter_only_when_pivot_at_least: float | None = None
+    max_entry_above_pivot: float = MAX_ENTRY_ABOVE_PIVOT
+    hard_sl_points: float = HARD_SL_POINTS
+    cost_sl_trigger: float = COST_SL_TRIGGER
+    tsl_trigger: float = TSL_TRIGGER
+    tsl_close_offset: float = TSL_CLOSE_OFFSET
+    max_losing_trades_per_day: int = MAX_LOSING_TRADES_PER_DAY
+    daily_stop_loss: float = DAILY_STOP_LOSS
+
+
+@dataclass
+class ActiveTrade:
+    side: str
+    entry_time: pd.Timestamp
+    entry_price: float
+    hard_sl: float
+    highest_close: float
+    mfe: float = 0.0
+    mae: float = 0.0
+    plus20_hit: bool = False
+    plus40_hit: bool = False
+
+
+def _trade_date_rows(candles: pd.DataFrame, trade_date: pd.Timestamp) -> pd.DataFrame:
+    rows = candles[candles["datetime"].dt.date == trade_date.date()]
+    return rows.sort_values("datetime").reset_index(drop=True)
+
+
+def _timestamp(value: pd.Timestamp) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _price(value: object) -> float:
+    return float(value)
+
+
+def _active_stop(trade: ActiveTrade, config: StrategyConfig) -> float:
+    stops = [trade.hard_sl]
+    if trade.plus20_hit:
+        stops.append(trade.entry_price)
+    if trade.plus40_hit:
+        stops.append(trade.highest_close - config.tsl_close_offset)
+    return max(stops)
+
+
+def _make_trade(
+    pair: PairedSession,
+    active: ActiveTrade,
+    exit_time: pd.Timestamp,
+    exit_price: float,
+    exit_reason: str,
+    loss_count: int,
+    daily_pnl: float,
+) -> Trade:
+    pnl = exit_price - active.entry_price
+    loss_count_after_trade = loss_count + (1 if pnl < 0 else 0)
+    daily_pnl_after_trade = daily_pnl + pnl
+
+    return Trade(
+        trade_date=pair.trade_date.date().isoformat(),
+        strike=pair.strike,
+        side=active.side,
+        entry_time=_timestamp(active.entry_time),
+        entry_price=active.entry_price,
+        exit_time=_timestamp(exit_time),
+        exit_price=exit_price,
+        pnl=pnl,
+        exit_reason=exit_reason,
+        pivot=float(pair.pivot),
+        mfe=active.mfe,
+        mae=active.mae,
+        plus20_hit=active.plus20_hit,
+        plus40_hit=active.plus40_hit,
+        loss_count_after_trade=loss_count_after_trade,
+        daily_pnl_after_trade=daily_pnl_after_trade,
+    )
+
+
+def _premium_filter_passes(close: float, pivot: float, config: StrategyConfig) -> bool:
+    if config.min_premium is None:
+        return True
+    if (
+        config.apply_premium_filter_only_when_pivot_at_least is not None
+        and pivot < config.apply_premium_filter_only_when_pivot_at_least
+    ):
+        return True
+    return close >= config.min_premium
+
+
+def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+    close = _price(row["close"])
+    return (
+        _premium_filter_passes(close, pivot, config)
+        and close > pivot
+        and close <= pivot + config.max_entry_above_pivot
+    )
+
+
+def _new_active_trade(side: str, row: pd.Series, config: StrategyConfig) -> ActiveTrade:
+    entry_price = _price(row["close"])
+    entry_time = row["datetime"]
+    return ActiveTrade(
+        side=side,
+        entry_time=entry_time,
+        entry_price=entry_price,
+        hard_sl=entry_price - config.hard_sl_points,
+        highest_close=entry_price,
+    )
+
+
+def _update_active_trade(active: ActiveTrade, row: pd.Series, config: StrategyConfig) -> None:
+    high = _price(row["high"])
+    low = _price(row["low"])
+    close = _price(row["close"])
+
+    active.mfe = max(active.mfe, high - active.entry_price)
+    active.mae = min(active.mae, low - active.entry_price)
+    active.highest_close = max(active.highest_close, close)
+
+    if high >= active.entry_price + config.cost_sl_trigger:
+        active.plus20_hit = True
+    if high >= active.entry_price + config.tsl_trigger:
+        active.plus40_hit = True
+
+
+def run_strategy_for_pair(
+    pair: PairedSession,
+    config: StrategyConfig | None = None,
+) -> list[Trade]:
+    config = config or StrategyConfig()
+    if pair.pivot is None or pd.isna(pair.pivot):
+        return []
+
+    pivot = float(pair.pivot)
+    ce_rows = _trade_date_rows(pair.ce, pair.trade_date)
+    pe_rows = _trade_date_rows(pair.pe, pair.trade_date)
+
+    by_time: dict[pd.Timestamp, dict[str, pd.Series]] = {}
+    for side, rows in (("CE", ce_rows), ("PE", pe_rows)):
+        for _, row in rows.iterrows():
+            by_time.setdefault(row["datetime"], {})[side] = row
+
+    trades: list[Trade] = []
+    active: ActiveTrade | None = None
+    loss_count = 0
+    daily_pnl = 0.0
+    stop_trading = False
+    last_row_by_side: dict[str, pd.Series] = {}
+
+    for candle_time in sorted(by_time):
+        side_rows = by_time[candle_time]
+        last_row_by_side.update(side_rows)
+
+        if active is not None:
+            active_row = side_rows.get(active.side)
+            if active_row is not None and candle_time > active.entry_time:
+                _update_active_trade(active, active_row, config)
+                stop = _active_stop(active, config)
+                close = _price(active_row["close"])
+                if close <= stop:
+                    trade = _make_trade(
+                        pair=pair,
+                        active=active,
+                        exit_time=candle_time,
+                        exit_price=close,
+                        exit_reason="stop",
+                        loss_count=loss_count,
+                        daily_pnl=daily_pnl,
+                    )
+                    trades.append(trade)
+                    loss_count = trade.loss_count_after_trade
+                    daily_pnl = trade.daily_pnl_after_trade
+                    active = None
+                    stop_trading = (
+                        loss_count >= config.max_losing_trades_per_day
+                        or daily_pnl <= config.daily_stop_loss
+                    )
+                    continue
+
+        if active is not None or stop_trading:
+            continue
+        if candle_time.strftime("%H:%M") < config.entry_start_time:
+            continue
+
+        candidates = []
+        for side in ("CE", "PE"):
+            row = side_rows.get(side)
+            if row is not None and _entry_candidate(row, pivot, config):
+                candidates.append((row["datetime"], side, row))
+
+        if candidates:
+            _, side, row = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+            active = _new_active_trade(side, row, config)
+
+    if active is not None:
+        exit_row = last_row_by_side.get(active.side)
+        if exit_row is not None:
+            if exit_row["datetime"] > active.entry_time:
+                _update_active_trade(active, exit_row, config)
+            trade = _make_trade(
+                pair=pair,
+                active=active,
+                exit_time=exit_row["datetime"],
+                exit_price=_price(exit_row["close"]),
+                exit_reason="end_of_day",
+                loss_count=loss_count,
+                daily_pnl=daily_pnl,
+            )
+            trades.append(trade)
+
+    return trades
+
+
+def run_strategy_for_pairs(
+    pairs: list[PairedSession],
+    config: StrategyConfig | None = None,
+) -> list[Trade]:
+    trades: list[Trade] = []
+    for pair in pairs:
+        trades.extend(run_strategy_for_pair(pair, config=config))
+    return trades
+
+
+def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
+    return pd.DataFrame([asdict(trade) for trade in trades])
+
+
+def _parse_scalar(raw_value: str) -> Any:
+    value = raw_value.strip()
+    lowered = value.lower()
+    if lowered in {"null", "none", "~"}:
+        return None
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def load_strategy_config(path: str | Path) -> StrategyConfig:
+    config_path = Path(path)
+    values: dict[str, Any] = {}
+
+    for line_number, line in enumerate(config_path.read_text().splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "#" in stripped:
+            stripped = stripped.split("#", 1)[0].strip()
+        if ":" not in stripped:
+            raise ValueError(f"{config_path}:{line_number}: expected 'key: value'")
+
+        key, raw_value = stripped.split(":", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"{config_path}:{line_number}: empty config key")
+        values[key] = _parse_scalar(raw_value)
+
+    return StrategyConfig(**values)
+
+
+def main() -> None:
+    extract_dir = extract_zip()
+    sessions = load_option_sessions(extract_dir)
+    pairs = build_paired_sessions(sessions)
+    trades = run_strategy_for_pairs(pairs)
+    trades_df = trades_to_dataframe(trades)
+
+    output_path = Path(PROJECT_ROOT) / "output" / "trades.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    trades_df.to_csv(output_path, index=False)
+
+    if trades_df.empty:
+        print("No trades generated.")
+    else:
+        print(trades_df.to_string(index=False))
+    print(f"\nSaved trades to {output_path}")
+
+
+if __name__ == "__main__":
+    main()

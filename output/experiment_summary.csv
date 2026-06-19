@@ -1,0 +1,4 @@
+experiment,trades,trading_days,wins,losses,total_pnl,avg_pnl,max_day_pnl,min_day_pnl
+v2A_no_premium_filter,42,14,13,29,71.05,1.69,92.3,-55.6
+v2B_premium_ge_100,33,12,11,22,105.4,3.19,92.3,-55.6
+v2C_premium_ge_100_when_pivot_ge_100,42,14,13,29,71.05,1.69,92.3,-55.6

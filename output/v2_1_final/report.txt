@@ -1,0 +1,13 @@
+Sweet Spot Backtest Report
+==========================
+Config: configs\v2_1_final.yaml
+
+Trading days: 12
+Trades: 33
+Wins: 11
+Losses: 22
+Win rate: 33.33%
+Total P&L: 105.40
+Average P&L per trade: 3.19
+Best day: 92.30
+Worst day: -55.60

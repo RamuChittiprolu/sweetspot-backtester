@@ -1,0 +1,11 @@
+name: v2C_conditional
+entry_start_time: "09:20"
+min_premium: 100
+apply_premium_filter_only_when_pivot_at_least: 100
+max_entry_above_pivot: 20
+hard_sl_points: 15
+cost_sl_trigger: 20
+tsl_trigger: 40
+tsl_close_offset: 20
+max_losing_trades_per_day: 3
+daily_stop_loss: -50
