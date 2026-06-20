@@ -16,5 +16,7 @@ entry_mode: retest_or_breakout
 enable_vacuum_breakout: true
 ema_period: 20
 max_entry_candle_range: 15
+vacuum_max_entry_candle_range: 25
+vacuum_pivot_sl_buffer: 0
 block_side_after_pivot_sl: false
 cooldown_candles_after_pivot_sl: 2
