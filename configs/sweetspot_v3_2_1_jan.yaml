@@ -1,0 +1,43 @@
+name: sweetspot_v3_2_1_jan
+data_dir: data/Jan_v3_1_anti_chase_extracted
+
+entry_start_time: "09:20"
+min_premium: null
+apply_premium_filter_only_when_pivot_at_least: null
+
+max_entry_above_pivot: 20
+max_entry_candle_range: 13
+max_entry_distance_from_ema20: 15
+vacuum_max_entry_candle_range: 25
+max_trades_per_day: 3
+
+hard_sl_points: 15
+hard_sl_mode: pivot_close
+
+cost_sl_trigger: 20
+tsl_trigger: 40
+tsl_close_offset: 20
+tsl_mode: candle_low
+
+max_losing_trades_per_day: 3
+daily_stop_loss: -50
+
+entry_ema20_quality_gate: true
+entry_ema20_near_points: 10
+
+
+require_entry_candle_touches_ema20: false
+entry_mode: retest_or_breakout
+enable_vacuum_breakout: true
+ema_period: 20
+vacuum_lookback_candles: 6
+vacuum_resistance_buffer: 5
+vacuum_pivot_sl_buffer: 5
+
+require_vacuum_green_candle: true
+require_vacuum_cross_ema20: false
+require_vacuum_cross_pivot: true
+
+block_side_after_pivot_sl: false
+cooldown_candles_after_pivot_sl: 0
+max_pivot_sl_per_day: null

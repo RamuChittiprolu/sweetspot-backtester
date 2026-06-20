@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ZIP_PATH = PROJECT_ROOT / "data" / "Jun.zip"
 EXTRACT_DIR = PROJECT_ROOT / "data" / "Jun_extracted"
 SESSION_OPEN_TIME = "09:15"
+CSV_FLOAT_FORMAT = "%.2f"
 
 
 @dataclass(frozen=True)
@@ -261,7 +262,7 @@ def main() -> None:
 
     output_path = PROJECT_ROOT / "output" / "session_summary.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(output_path, index=False)
+    summary.to_csv(output_path, index=False, float_format=CSV_FLOAT_FORMAT)
     print(summary.to_string(index=False))
     print(f"\nSaved summary to {output_path}")
 

@@ -9,22 +9,28 @@ try:
     from .loader import PROJECT_ROOT, build_paired_sessions, extract_zip, load_option_sessions
     from .strategy import (
         Trade,
+        VacuumDiagnostic,
         load_strategy_config,
         run_strategy_for_pairs,
         trades_to_dataframe,
+        vacuum_diagnostics_to_dataframe,
     )
 except ImportError:
     from loader import PROJECT_ROOT, build_paired_sessions, extract_zip, load_option_sessions
     from strategy import (
         Trade,
+        VacuumDiagnostic,
         load_strategy_config,
         run_strategy_for_pairs,
         trades_to_dataframe,
+        vacuum_diagnostics_to_dataframe,
     )
 
 
 TRADE_COLUMNS = list(Trade.__dataclass_fields__.keys())
+VACUUM_DIAGNOSTIC_COLUMNS = list(VacuumDiagnostic.__dataclass_fields__.keys())
 DAILY_COLUMNS = ["trade_date", "trades", "wins", "losses", "gross_pnl", "day_pnl"]
+CSV_FLOAT_FORMAT = "%.2f"
 
 
 def build_daily_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
@@ -153,6 +159,23 @@ def build_ema20_diagnostics_summary(trades_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def _load_sessions_for_config(config) -> dict:
+    if config.data_dir:
+        data_path = Path(PROJECT_ROOT) / config.data_dir
+        if not data_path.exists():
+            raise FileNotFoundError(
+                f"Configured data_dir does not exist: {data_path}"
+            )
+        if not data_path.is_dir():
+            raise FileNotFoundError(
+                f"Configured data_dir is not a folder: {data_path}"
+            )
+        return load_option_sessions(data_path)
+
+    extract_dir = extract_zip()
+    return load_option_sessions(extract_dir)
+
+
 def run_backtest(
     config_path: str | Path,
     output_name: str | None = None,
@@ -160,25 +183,46 @@ def run_backtest(
     config_path = Path(config_path)
     config = load_strategy_config(config_path)
 
-    extract_dir = extract_zip()
-    sessions = load_option_sessions(extract_dir)
+    sessions = _load_sessions_for_config(config)
     pairs = build_paired_sessions(sessions)
-    trades = run_strategy_for_pairs(pairs, config=config)
+    vacuum_diagnostics = []
+    trades = run_strategy_for_pairs(
+        pairs,
+        config=config,
+        vacuum_diagnostics=vacuum_diagnostics,
+    )
 
     trades_df = trades_to_dataframe(trades)
     if trades_df.empty:
         trades_df = pd.DataFrame(columns=TRADE_COLUMNS)
 
     daily_df = build_daily_summary(trades_df)
+    vacuum_diagnostics_df = vacuum_diagnostics_to_dataframe(vacuum_diagnostics)
+    if vacuum_diagnostics_df.empty:
+        vacuum_diagnostics_df = pd.DataFrame(columns=VACUUM_DIAGNOSTIC_COLUMNS)
     report = build_report(config_path, trades_df, daily_df)
 
     output_dir = Path(PROJECT_ROOT) / "output" / (output_name or config.name)
     output_dir.mkdir(parents=True, exist_ok=True)
-    trades_df.to_csv(output_dir / "trades.csv", index=False)
-    daily_df.to_csv(output_dir / "daily_summary.csv", index=False)
+    trades_df.to_csv(
+        output_dir / "trades.csv",
+        index=False,
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    daily_df.to_csv(
+        output_dir / "daily_summary.csv",
+        index=False,
+        float_format=CSV_FLOAT_FORMAT,
+    )
     build_ema20_diagnostics_summary(trades_df).to_csv(
         output_dir / "ema20_diagnostics_summary.csv",
         index=False,
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    vacuum_diagnostics_df.to_csv(
+        output_dir / "vacuum_diagnostics.csv",
+        index=False,
+        float_format=CSV_FLOAT_FORMAT,
     )
     (output_dir / "report.txt").write_text(report)
 

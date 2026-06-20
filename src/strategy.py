@@ -34,6 +34,7 @@ TSL_CLOSE_OFFSET = 20.0
 MAX_LOSING_TRADES_PER_DAY = 3
 DAILY_STOP_LOSS = -50.0
 ANTI_CHASE_MAX_ENTRY_CANDLE_RANGE = 15.0
+CSV_FLOAT_FORMAT = "%.2f"
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class Trade:
     trade_date: str
     strike: int
     side: str
+    entry_setup: str
     entry_time: str
     entry_price: float
     exit_time: str
@@ -83,6 +85,30 @@ class SkippedAntiChase:
 
 
 @dataclass(frozen=True)
+class VacuumDiagnostic:
+    trade_date: str
+    side: str
+    strike: int
+    datetime: str
+    close: float
+    pivot: float
+    ema20: float
+    previous_close: float | None
+    previous_ema20: float | None
+    entry_candle_color: str
+    entry_candle_range: float
+    close_above_pivot: bool
+    close_above_ema20: bool
+    within_pivot_plus_20: bool
+    anti_chase_pass: bool
+    green_candle_pass: bool
+    cross_pivot_pass: bool
+    cross_ema20_pass: bool
+    left_space_pass: bool
+    rejection_reason: str
+
+
+@dataclass(frozen=True)
 class StrategyConfig:
     name: str = "v2"
     entry_start_time: str = ENTRY_START_TIME
@@ -96,14 +122,27 @@ class StrategyConfig:
     max_losing_trades_per_day: int = MAX_LOSING_TRADES_PER_DAY
     daily_stop_loss: float = DAILY_STOP_LOSS
     require_entry_candle_touches_ema20: bool = False
+    entry_ema20_quality_gate: bool = False
+    entry_ema20_near_points: float = 10.0
     entry_mode: str = "immediate"
     max_entry_candle_range: float | None = ANTI_CHASE_MAX_ENTRY_CANDLE_RANGE
+    max_entry_distance_from_ema20: float | None = None
     hard_sl_mode: str = "fixed_points"
     tsl_mode: str = "highest_close_offset"
     enable_vacuum_breakout: bool = False
     ema_period: int = 20
+    vacuum_lookback_candles: int = 6
+    vacuum_resistance_buffer: float = 5.0
+    vacuum_max_entry_candle_range: float | None = 25.0
+    vacuum_pivot_sl_buffer: float = 0.0
+    require_vacuum_green_candle: bool = True
+    require_vacuum_cross_ema20: bool = True
+    require_vacuum_cross_pivot: bool = True
     block_side_after_pivot_sl: bool = False
     cooldown_candles_after_pivot_sl: int = 0
+    max_pivot_sl_per_day: int | None = None
+    max_trades_per_day: int | None = None
+    data_dir: str | None = None
 
 
 @dataclass
@@ -113,6 +152,7 @@ class ActiveTrade:
     entry_price: float
     hard_sl: float
     highest_close: float
+    entry_setup: str = "normal"
     mfe: float = 0.0
     mae: float = 0.0
     plus20_hit: bool = False
@@ -175,6 +215,15 @@ def _anti_chase_passes(row: pd.Series, config: StrategyConfig) -> bool:
     return _candle_range(row) <= config.max_entry_candle_range
 
 
+def _vacuum_range_passes(row: pd.Series, config: StrategyConfig) -> bool:
+    max_range = config.vacuum_max_entry_candle_range
+    if max_range is None:
+        max_range = config.max_entry_candle_range
+    if max_range is None:
+        return True
+    return _candle_range(row) <= max_range
+
+
 def _active_stop(trade: ActiveTrade, config: StrategyConfig) -> float:
     if config.hard_sl_mode == "pivot_close":
         stops = [trade.current_stop]
@@ -209,6 +258,7 @@ def _make_trade(
         trade_date=pair.trade_date.date().isoformat(),
         strike=pair.strike,
         side=active.side,
+        entry_setup=active.entry_setup,
         entry_time=_timestamp(active.entry_time),
         entry_price=active.entry_price,
         exit_time=_timestamp(exit_time),
@@ -249,16 +299,41 @@ def _premium_filter_passes(close: float, pivot: float, config: StrategyConfig) -
     return close >= config.min_premium
 
 
+def _ema20_distance_passes(row: pd.Series, config: StrategyConfig) -> bool:
+    if config.max_entry_distance_from_ema20 is None:
+        return True
+    distance_from_ema20 = _price(row["close"]) - _price(row["ema20"])
+    return distance_from_ema20 <= config.max_entry_distance_from_ema20
+
+
+def _ema20_quality_gate_passes(
+    row: pd.Series,
+    previous_row: pd.Series | None,
+    config: StrategyConfig,
+) -> bool:
+    if not config.entry_ema20_quality_gate:
+        return True
+    distance_from_ema20 = _price(row["close"]) - _price(row["ema20"])
+    return (
+        _candle_touched_ema20(row)
+        or _candle_touched_ema20(previous_row)
+        or abs(distance_from_ema20) <= config.entry_ema20_near_points
+    )
+
+
 def _entry_candidate_before_anti_chase(
     row: pd.Series,
     pivot: float,
     config: StrategyConfig,
+    previous_row: pd.Series | None = None,
 ) -> bool:
     close = _price(row["close"])
     return (
         _premium_filter_passes(close, pivot, config)
         and close > pivot
         and close <= pivot + config.max_entry_above_pivot
+        and _ema20_distance_passes(row, config)
+        and _ema20_quality_gate_passes(row, previous_row, config)
         and (
             not config.require_entry_candle_touches_ema20
             or _candle_touched_ema20(row)
@@ -266,8 +341,18 @@ def _entry_candidate_before_anti_chase(
     )
 
 
-def _entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
-    return _entry_candidate_before_anti_chase(row, pivot, config) and _anti_chase_passes(
+def _entry_candidate(
+    row: pd.Series,
+    pivot: float,
+    config: StrategyConfig,
+    previous_row: pd.Series | None = None,
+) -> bool:
+    return _entry_candidate_before_anti_chase(
+        row,
+        pivot,
+        config,
+        previous_row,
+    ) and _anti_chase_passes(
         row,
         config,
     )
@@ -281,19 +366,182 @@ def _retest_entry_candidate_before_anti_chase(
     row: pd.Series,
     pivot: float,
     config: StrategyConfig,
+    previous_row: pd.Series | None = None,
 ) -> bool:
     return (
-        _entry_candidate_before_anti_chase(row, pivot, config)
+        _entry_candidate_before_anti_chase(row, pivot, config, previous_row)
         and _price(row["low"]) <= pivot <= _price(row["high"])
     )
 
 
-def _retest_entry_candidate(row: pd.Series, pivot: float, config: StrategyConfig) -> bool:
+def _retest_entry_candidate(
+    row: pd.Series,
+    pivot: float,
+    config: StrategyConfig,
+    previous_row: pd.Series | None = None,
+) -> bool:
     return _retest_entry_candidate_before_anti_chase(
         row,
         pivot,
         config,
+        previous_row,
     ) and _anti_chase_passes(row, config)
+
+
+def _evaluate_vacuum_breakout(
+    history_rows: list[pd.Series],
+    row: pd.Series,
+    previous_row: pd.Series | None,
+    pivot: float,
+    config: StrategyConfig,
+) -> dict[str, object]:
+    close = _price(row["close"])
+    ema20 = _price(row["ema20"])
+    previous_close = _price(previous_row["close"]) if previous_row is not None else None
+    previous_ema20 = _price(previous_row["ema20"]) if previous_row is not None else None
+    entry_candle_color = _candle_color(row)
+    entry_candle_range = _candle_range(row)
+    lookback = max(config.vacuum_lookback_candles, 0)
+    resistance_level = close - config.vacuum_resistance_buffer
+    left_space_pass = not any(
+        _price(history_row["high"]) >= resistance_level
+        for history_row in (history_rows[-lookback:] if lookback else [])
+    )
+
+    close_above_pivot = close > pivot
+    close_above_ema20 = close > ema20
+    within_pivot_plus_20 = close <= pivot + config.max_entry_above_pivot
+    ema20_distance_pass = _ema20_distance_passes(row, config)
+    ema20_quality_gate_pass = _ema20_quality_gate_passes(row, previous_row, config)
+    anti_chase_pass = _vacuum_range_passes(row, config)
+    green_candle_pass = (
+        not config.require_vacuum_green_candle or entry_candle_color == "green"
+    )
+    cross_pivot_pass = (
+        previous_close is not None
+        and (not config.require_vacuum_cross_pivot or previous_close <= pivot)
+    )
+    cross_ema20_pass = (
+        True
+        if not config.require_vacuum_cross_ema20
+        else (
+            previous_close is not None
+            and previous_ema20 is not None
+            and previous_close <= previous_ema20
+        )
+    )
+
+    rejection_reason = "accepted"
+    if not within_pivot_plus_20:
+        rejection_reason = "outside_pivot_plus_20"
+    elif not close_above_ema20:
+        rejection_reason = "not_above_ema20"
+    elif not ema20_distance_pass:
+        rejection_reason = "entry_distance_from_ema20_gt_limit"
+    elif not ema20_quality_gate_pass:
+        rejection_reason = "entry_ema20_quality_gate_failed"
+    elif not anti_chase_pass:
+        rejection_reason = "entry_candle_range_gt_limit"
+    elif not green_candle_pass:
+        rejection_reason = "not_green"
+    elif not cross_pivot_pass:
+        rejection_reason = "not_cross_pivot"
+    elif not cross_ema20_pass:
+        rejection_reason = "not_cross_ema20"
+    elif not left_space_pass:
+        rejection_reason = "left_resistance_nearby"
+
+    accepted = (
+        config.enable_vacuum_breakout
+        and close_above_pivot
+        and close_above_ema20
+        and within_pivot_plus_20
+        and ema20_distance_pass
+        and ema20_quality_gate_pass
+        and anti_chase_pass
+        and green_candle_pass
+        and cross_pivot_pass
+        and cross_ema20_pass
+        and left_space_pass
+    )
+
+    return {
+        "accepted": accepted,
+        "close": close,
+        "pivot": pivot,
+        "ema20": ema20,
+        "previous_close": previous_close,
+        "previous_ema20": previous_ema20,
+        "entry_candle_color": entry_candle_color,
+        "entry_candle_range": entry_candle_range,
+        "close_above_pivot": close_above_pivot,
+        "close_above_ema20": close_above_ema20,
+        "within_pivot_plus_20": within_pivot_plus_20,
+        "anti_chase_pass": anti_chase_pass,
+        "green_candle_pass": green_candle_pass,
+        "cross_pivot_pass": cross_pivot_pass,
+        "cross_ema20_pass": cross_ema20_pass,
+        "left_space_pass": left_space_pass,
+        "rejection_reason": "accepted" if accepted else rejection_reason,
+    }
+
+
+def _vacuum_breakout_candidate(
+    history_rows: list[pd.Series],
+    row: pd.Series,
+    previous_row: pd.Series | None,
+    pivot: float,
+    config: StrategyConfig,
+) -> bool:
+    return bool(
+        _evaluate_vacuum_breakout(
+            history_rows,
+            row,
+            previous_row,
+            pivot,
+            config,
+        )["accepted"]
+    )
+
+
+def _vacuum_diagnostic(
+    pair: PairedSession,
+    side: str,
+    row: pd.Series,
+    previous_row: pd.Series | None,
+    history_rows: list[pd.Series],
+    pivot: float,
+    config: StrategyConfig,
+) -> VacuumDiagnostic:
+    evaluation = _evaluate_vacuum_breakout(
+        history_rows,
+        row,
+        previous_row,
+        pivot,
+        config,
+    )
+    return VacuumDiagnostic(
+        trade_date=pair.trade_date.date().isoformat(),
+        side=side,
+        strike=pair.strike,
+        datetime=_timestamp(row["datetime"]),
+        close=float(evaluation["close"]),
+        pivot=float(evaluation["pivot"]),
+        ema20=float(evaluation["ema20"]),
+        previous_close=evaluation["previous_close"],
+        previous_ema20=evaluation["previous_ema20"],
+        entry_candle_color=str(evaluation["entry_candle_color"]),
+        entry_candle_range=float(evaluation["entry_candle_range"]),
+        close_above_pivot=bool(evaluation["close_above_pivot"]),
+        close_above_ema20=bool(evaluation["close_above_ema20"]),
+        within_pivot_plus_20=bool(evaluation["within_pivot_plus_20"]),
+        anti_chase_pass=bool(evaluation["anti_chase_pass"]),
+        green_candle_pass=bool(evaluation["green_candle_pass"]),
+        cross_pivot_pass=bool(evaluation["cross_pivot_pass"]),
+        cross_ema20_pass=bool(evaluation["cross_ema20_pass"]),
+        left_space_pass=bool(evaluation["left_space_pass"]),
+        rejection_reason=str(evaluation["rejection_reason"]),
+    )
 
 
 def _symbol(pair: PairedSession, side: str) -> str:
@@ -328,6 +576,7 @@ def _new_active_trade(
     previous_row: pd.Series | None,
     config: StrategyConfig,
     pivot: float,
+    entry_setup: str = "normal",
 ) -> ActiveTrade:
     entry_price = _price(row["close"])
     entry_time = row["datetime"]
@@ -343,6 +592,7 @@ def _new_active_trade(
         entry_price=entry_price,
         hard_sl=hard_sl,
         highest_close=entry_price,
+        entry_setup=entry_setup,
         entry_ema20=entry_ema20,
         entry_above_ema20=entry_price > entry_ema20,
         distance_from_ema20=distance_from_ema20,
@@ -403,7 +653,17 @@ def _exit_signal(
                 return True, "cost_to_cost"
         if active.plus20_hit and close <= active.entry_price:
             return True, "cost_to_cost"
-        if not active.plus20_hit and close < active.pivot:
+        if (
+            not active.plus20_hit
+            and active.entry_setup == "vacuum_breakout"
+            and close < active.pivot - config.vacuum_pivot_sl_buffer
+        ):
+            return True, "vacuum_pivot_buffer_sl"
+        if (
+            not active.plus20_hit
+            and active.entry_setup != "vacuum_breakout"
+            and close < active.pivot
+        ):
             return True, "pivot_close_sl"
         return False, ""
 
@@ -434,6 +694,7 @@ def run_strategy_for_pair(
     pair: PairedSession,
     config: StrategyConfig | None = None,
     skipped_anti_chase: list[SkippedAntiChase] | None = None,
+    vacuum_diagnostics: list[VacuumDiagnostic] | None = None,
 ) -> list[Trade]:
     config = config or StrategyConfig()
     if pair.pivot is None or pd.isna(pair.pivot):
@@ -445,16 +706,21 @@ def run_strategy_for_pair(
 
     by_time: dict[pd.Timestamp, dict[str, pd.Series]] = {}
     previous_by_time: dict[pd.Timestamp, dict[str, pd.Series | None]] = {}
+    history_by_time: dict[pd.Timestamp, dict[str, list[pd.Series]]] = {}
     for side, rows in (("CE", ce_rows), ("PE", pe_rows)):
         previous_row: pd.Series | None = None
+        history_rows: list[pd.Series] = []
         for _, row in rows.iterrows():
             by_time.setdefault(row["datetime"], {})[side] = row
             previous_by_time.setdefault(row["datetime"], {})[side] = previous_row
+            history_by_time.setdefault(row["datetime"], {})[side] = list(history_rows)
+            history_rows.append(row)
             previous_row = row
 
     trades: list[Trade] = []
     active: ActiveTrade | None = None
     loss_count = 0
+    trade_count = 0
     daily_pnl = 0.0
     stop_trading = False
     last_row_by_side: dict[str, pd.Series] = {}
@@ -465,6 +731,24 @@ def run_strategy_for_pair(
     for candle_time in sorted(by_time):
         side_rows = by_time[candle_time]
         last_row_by_side.update(side_rows)
+
+        if config.enable_vacuum_breakout and vacuum_diagnostics is not None:
+            for side, row in side_rows.items():
+                close = _price(row["close"])
+                if close > pivot and close <= pivot + config.max_entry_above_pivot:
+                    previous_row = previous_by_time.get(row["datetime"], {}).get(side)
+                    history_rows = history_by_time.get(row["datetime"], {}).get(side, [])
+                    vacuum_diagnostics.append(
+                        _vacuum_diagnostic(
+                            pair,
+                            side,
+                            row,
+                            previous_row,
+                            history_rows,
+                            pivot,
+                            config,
+                        )
+                    )
 
         if active is not None:
             active_row = side_rows.get(active.side)
@@ -498,25 +782,42 @@ def run_strategy_for_pair(
 
         if active is not None or stop_trading:
             continue
+        if (
+            config.max_trades_per_day is not None
+            and trade_count >= config.max_trades_per_day
+        ):
+            continue
         if candle_time.strftime("%H:%M") < config.entry_start_time:
             continue
 
         candidates = []
         for side in ("CE", "PE"):
-            if blocked_sides[side]:
-                continue
             row = side_rows.get(side)
             if row is None:
+                continue
+            if blocked_sides[side]:
                 continue
             if cooldown_candles[side] > 0:
                 cooldown_candles[side] -= 1
                 continue
+            previous_row = previous_by_time.get(row["datetime"], {}).get(side)
+            history_rows = history_by_time.get(row["datetime"], {}).get(side, [])
             if config.entry_mode == "retest_only":
-                if breakout_seen[side] and _retest_entry_candidate(row, pivot, config):
-                    candidates.append((row["datetime"], side, row))
+                if breakout_seen[side] and _retest_entry_candidate(
+                    row,
+                    pivot,
+                    config,
+                    previous_row,
+                ):
+                    candidates.append((row["datetime"], side, row, "normal"))
                 elif (
                     breakout_seen[side]
-                    and _retest_entry_candidate_before_anti_chase(row, pivot, config)
+                    and _retest_entry_candidate_before_anti_chase(
+                        row,
+                        pivot,
+                        config,
+                        previous_row,
+                    )
                     and not _anti_chase_passes(row, config)
                 ):
                     if skipped_anti_chase is not None:
@@ -524,29 +825,58 @@ def run_strategy_for_pair(
                 elif not breakout_seen[side] and _breakout_candidate(row, pivot):
                     breakout_seen[side] = True
             elif config.entry_mode == "retest_or_breakout":
-                if _retest_entry_candidate(row, pivot, config):
-                    candidates.append((row["datetime"], side, row))
-                elif config.enable_vacuum_breakout and _entry_candidate(row, pivot, config):
-                    candidates.append((row["datetime"], side, row))
+                if _vacuum_breakout_candidate(
+                    history_rows,
+                    row,
+                    previous_row,
+                    pivot,
+                    config,
+                ):
+                    candidates.append((row["datetime"], side, row, "vacuum_breakout"))
+                elif _retest_entry_candidate(row, pivot, config, previous_row):
+                    candidates.append((row["datetime"], side, row, "normal"))
+                elif _entry_candidate(row, pivot, config, previous_row):
+                    candidates.append((row["datetime"], side, row, "normal"))
                 elif (
-                    _entry_candidate_before_anti_chase(row, pivot, config)
+                    _entry_candidate_before_anti_chase(
+                        row,
+                        pivot,
+                        config,
+                        previous_row,
+                    )
                     and not _anti_chase_passes(row, config)
                 ):
                     if skipped_anti_chase is not None:
                         skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
-            elif _entry_candidate(row, pivot, config):
-                candidates.append((row["datetime"], side, row))
+            elif _entry_candidate(row, pivot, config, previous_row):
+                candidates.append((row["datetime"], side, row, "normal"))
             elif (
-                _entry_candidate_before_anti_chase(row, pivot, config)
+                _entry_candidate_before_anti_chase(
+                    row,
+                    pivot,
+                    config,
+                    previous_row,
+                )
                 and not _anti_chase_passes(row, config)
             ):
                 if skipped_anti_chase is not None:
                     skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
 
         if candidates:
-            _, side, row = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+            _, side, row, entry_setup = sorted(
+                candidates,
+                key=lambda item: (item[0], item[1]),
+            )[0]
             previous_row = previous_by_time.get(row["datetime"], {}).get(side)
-            active = _new_active_trade(side, row, previous_row, config, pivot)
+            active = _new_active_trade(
+                side,
+                row,
+                previous_row,
+                config,
+                pivot,
+                entry_setup,
+            )
+            trade_count += 1
             breakout_seen = {"CE": False, "PE": False}
 
     if active is not None:
@@ -572,6 +902,7 @@ def run_strategy_for_pairs(
     pairs: list[PairedSession],
     config: StrategyConfig | None = None,
     skipped_anti_chase: list[SkippedAntiChase] | None = None,
+    vacuum_diagnostics: list[VacuumDiagnostic] | None = None,
 ) -> list[Trade]:
     trades: list[Trade] = []
     for pair in pairs:
@@ -580,6 +911,7 @@ def run_strategy_for_pairs(
                 pair,
                 config=config,
                 skipped_anti_chase=skipped_anti_chase,
+                vacuum_diagnostics=vacuum_diagnostics,
             )
         )
     return trades
@@ -591,6 +923,12 @@ def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
 
 def skipped_anti_chase_to_dataframe(skipped: list[SkippedAntiChase]) -> pd.DataFrame:
     return pd.DataFrame([asdict(row) for row in skipped])
+
+
+def vacuum_diagnostics_to_dataframe(
+    diagnostics: list[VacuumDiagnostic],
+) -> pd.DataFrame:
+    return pd.DataFrame([asdict(row) for row in diagnostics])
 
 
 def _parse_scalar(raw_value: str) -> Any:
@@ -645,7 +983,7 @@ def main() -> None:
 
     output_path = Path(PROJECT_ROOT) / "output" / "trades.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    trades_df.to_csv(output_path, index=False)
+    trades_df.to_csv(output_path, index=False, float_format=CSV_FLOAT_FORMAT)
 
     if trades_df.empty:
         print("No trades generated.")
