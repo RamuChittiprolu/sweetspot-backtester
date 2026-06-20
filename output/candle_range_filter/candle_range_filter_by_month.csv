@@ -1,0 +1,17 @@
+variant,settings,month,trades,wins,losses,win_rate,total_pnl,max_drawdown,pnl_drawdown_ratio
+A,baseline_no_filter,Mar,25,7,18,28.0,-134.85,-232.9,-0.579
+A,baseline_no_filter,Apr,35,12,23,34.29,91.25,-174.35,0.5234
+A,baseline_no_filter,May,36,11,24,30.56,79.9,-165.9,0.4816
+A,baseline_no_filter,Jun,18,8,10,44.44,141.35,-136.95,1.0321
+B,range_le_20,Mar,14,6,8,42.86,236.1,-62.0,3.8081
+B,range_le_20,Apr,25,10,15,40.0,12.75,-134.95,0.0945
+B,range_le_20,May,32,10,21,31.25,95.0,-163.85,0.5798
+B,range_le_20,Jun,18,8,10,44.44,150.3,-133.1,1.1292
+C,range_le_15,Mar,10,5,5,50.0,232.8,-43.65,5.3333
+C,range_le_15,Apr,17,7,10,41.18,53.95,-124.3,0.434
+C,range_le_15,May,22,7,15,31.82,155.55,-111.2,1.3988
+C,range_le_15,Jun,14,6,8,42.86,59.95,-97.7,0.6136
+D,range_le_12,Mar,6,4,2,66.67,267.95,-17.95,14.9276
+D,range_le_12,Apr,9,3,6,33.33,6.85,-67.35,0.1017
+D,range_le_12,May,13,4,9,30.77,192.1,-85.95,2.235
+D,range_le_12,Jun,11,3,8,27.27,-62.9,-73.5,-0.8558

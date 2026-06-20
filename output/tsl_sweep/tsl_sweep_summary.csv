@@ -1,0 +1,5 @@
+rank,variant,settings,config,trades,wins,losses,win_rate,total_pnl,max_drawdown,profit_drawdown_ratio
+1,A,activate_40_points_20,configs/tsl_sweep_A_baseline.yaml,114,38,75,33.33,177.65,-269.9,0.6582
+2,D,activate_30_points_15,configs/tsl_sweep_D_activate_30_points_15.yaml,115,42,72,36.52,136.15,-273.1,0.4985
+3,B,activate_35_points_20,configs/tsl_sweep_B_activate_35_points_20.yaml,114,39,74,34.21,109.1,-273.1,0.3995
+4,C,activate_30_points_20,configs/tsl_sweep_C_activate_30_points_20.yaml,115,41,73,35.65,101.0,-273.1,0.3698

@@ -1,0 +1,4 @@
+period,trading_days,trades,wins,losses,win_rate,total_pnl,avg_pnl,best_day,worst_day,max_drawdown,profit_factor,longest_losing_streak,paired_sessions
+Jan,15,32,7,25,21.88,-102.35,-3.2,77.75,-46.35,-149.15,0.71,6,20.0
+Feb,13,30,5,24,16.67,-274.15,-9.14,55.0,-55.55,-289.4,0.27,8,21.0
+Jan+Feb,28,62,12,49,19.35,-376.5,-6.07,77.75,-55.55,-423.3,0.48,8,

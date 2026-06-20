@@ -1,0 +1,5 @@
+rank,variant,settings,config,trades,wins,losses,win_rate,total_pnl,max_drawdown,pnl_drawdown_ratio
+1,D,range_le_12,configs/range_filter_D_range_12.yaml,39,14,25,35.9,404.0,-85.95,4.7004
+2,C,range_le_15,configs/range_filter_C_range_15.yaml,63,25,38,39.68,502.25,-124.3,4.0406
+3,B,range_le_20,configs/range_filter_B_range_20.yaml,89,34,54,38.2,494.15,-163.85,3.0159
+4,A,baseline_no_filter,configs/range_filter_A_baseline.yaml,114,38,75,33.33,177.65,-269.9,0.6582

@@ -1,0 +1,17 @@
+variant,settings,month,trades,wins,losses,win_rate,total_pnl,max_drawdown,profit_drawdown_ratio
+A,activate_40_points_20,Mar,25,7,18,28.0,-134.85,-232.9,-0.579
+A,activate_40_points_20,Apr,35,12,23,34.29,91.25,-174.35,0.5234
+A,activate_40_points_20,May,36,11,24,30.56,79.9,-165.9,0.4816
+A,activate_40_points_20,Jun,18,8,10,44.44,141.35,-136.95,1.0321
+B,activate_35_points_20,Mar,25,8,17,32.0,-138.05,-236.1,-0.5847
+B,activate_35_points_20,Apr,35,12,23,34.29,91.25,-174.35,0.5234
+B,activate_35_points_20,May,36,11,24,30.56,79.9,-165.9,0.4816
+B,activate_35_points_20,Jun,18,8,10,44.44,76.0,-136.95,0.5549
+C,activate_30_points_20,Mar,25,8,17,32.0,-138.05,-236.1,-0.5847
+C,activate_30_points_20,Apr,35,12,23,34.29,91.25,-174.35,0.5234
+C,activate_30_points_20,May,36,12,23,33.33,83.15,-165.9,0.5012
+C,activate_30_points_20,Jun,19,9,10,47.37,64.65,-137.25,0.471
+D,activate_30_points_15,Mar,25,8,17,32.0,-122.0,-236.1,-0.5167
+D,activate_30_points_15,Apr,35,12,23,34.29,45.95,-174.35,0.2636
+D,activate_30_points_15,May,36,13,22,36.11,89.15,-165.9,0.5374
+D,activate_30_points_15,Jun,19,9,10,47.37,123.05,-125.3,0.982

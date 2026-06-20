@@ -98,6 +98,12 @@ class StrategyConfig:
     require_entry_candle_touches_ema20: bool = False
     entry_mode: str = "immediate"
     max_entry_candle_range: float | None = ANTI_CHASE_MAX_ENTRY_CANDLE_RANGE
+    hard_sl_mode: str = "fixed_points"
+    tsl_mode: str = "highest_close_offset"
+    enable_vacuum_breakout: bool = False
+    ema_period: int = 20
+    block_side_after_pivot_sl: bool = False
+    cooldown_candles_after_pivot_sl: int = 0
 
 
 @dataclass
@@ -124,6 +130,10 @@ class ActiveTrade:
     entry_candle_low: float = 0.0
     entry_candle_range: float = 0.0
     anti_chase_pass: bool = True
+    pivot: float = 0.0
+    current_stop: float = 0.0
+    trailing_sl: float | None = None
+    last_confirmed_candle_low: float = 0.0
 
 
 def _trade_date_rows(candles: pd.DataFrame, trade_date: pd.Timestamp) -> pd.DataFrame:
@@ -166,6 +176,14 @@ def _anti_chase_passes(row: pd.Series, config: StrategyConfig) -> bool:
 
 
 def _active_stop(trade: ActiveTrade, config: StrategyConfig) -> float:
+    if config.hard_sl_mode == "pivot_close":
+        stops = [trade.current_stop]
+        if trade.plus20_hit:
+            stops.append(trade.entry_price)
+        if trade.plus40_hit and trade.trailing_sl is not None:
+            stops.append(trade.trailing_sl)
+        return max(stops)
+
     stops = [trade.hard_sl]
     if trade.plus20_hit:
         stops.append(trade.entry_price)
@@ -309,6 +327,7 @@ def _new_active_trade(
     row: pd.Series,
     previous_row: pd.Series | None,
     config: StrategyConfig,
+    pivot: float,
 ) -> ActiveTrade:
     entry_price = _price(row["close"])
     entry_time = row["datetime"]
@@ -317,11 +336,12 @@ def _new_active_trade(
     entry_candle_high = _price(row["high"])
     entry_candle_low = _price(row["low"])
     entry_candle_range = entry_candle_high - entry_candle_low
+    hard_sl = pivot if config.hard_sl_mode == "pivot_close" else entry_price - config.hard_sl_points
     return ActiveTrade(
         side=side,
         entry_time=entry_time,
         entry_price=entry_price,
-        hard_sl=entry_price - config.hard_sl_points,
+        hard_sl=hard_sl,
         highest_close=entry_price,
         entry_ema20=entry_ema20,
         entry_above_ema20=entry_price > entry_ema20,
@@ -336,6 +356,10 @@ def _new_active_trade(
         entry_candle_low=entry_candle_low,
         entry_candle_range=entry_candle_range,
         anti_chase_pass=_anti_chase_passes(row, config),
+        pivot=pivot,
+        current_stop=hard_sl,
+        trailing_sl=None,
+        last_confirmed_candle_low=entry_candle_low,
     )
 
 
@@ -343,6 +367,7 @@ def _update_active_trade(active: ActiveTrade, row: pd.Series, config: StrategyCo
     high = _price(row["high"])
     low = _price(row["low"])
     close = _price(row["close"])
+    previous_confirmed_low = active.last_confirmed_candle_low
 
     active.mfe = max(active.mfe, high - active.entry_price)
     active.mae = min(active.mae, low - active.entry_price)
@@ -352,6 +377,57 @@ def _update_active_trade(active: ActiveTrade, row: pd.Series, config: StrategyCo
         active.plus20_hit = True
     if high >= active.entry_price + config.tsl_trigger:
         active.plus40_hit = True
+    if active.plus40_hit and config.tsl_mode == "candle_low":
+        if active.trailing_sl is None:
+            active.trailing_sl = max(previous_confirmed_low, low)
+        else:
+            active.trailing_sl = max(active.trailing_sl, previous_confirmed_low, low)
+
+    active.current_stop = _active_stop(active, config)
+    active.last_confirmed_candle_low = low
+
+
+def _exit_signal(
+    active: ActiveTrade,
+    row: pd.Series,
+    config: StrategyConfig,
+) -> tuple[bool, str]:
+    close = _price(row["close"])
+
+    if config.hard_sl_mode == "pivot_close":
+        if active.plus40_hit and active.trailing_sl is not None:
+            effective_stop = max(active.entry_price, active.trailing_sl)
+            if close <= effective_stop:
+                if active.trailing_sl >= active.entry_price:
+                    return True, "tsl_candle_low"
+                return True, "cost_to_cost"
+        if active.plus20_hit and close <= active.entry_price:
+            return True, "cost_to_cost"
+        if not active.plus20_hit and close < active.pivot:
+            return True, "pivot_close_sl"
+        return False, ""
+
+    stop = _active_stop(active, config)
+    if close <= stop:
+        return True, "stop"
+    return False, ""
+
+
+def _exit_price(
+    active: ActiveTrade,
+    close: float,
+    exit_reason: str,
+    config: StrategyConfig,
+) -> float:
+    if config.hard_sl_mode != "pivot_close":
+        return close
+    if exit_reason == "cost_to_cost":
+        return active.entry_price
+    if exit_reason == "tsl_candle_low":
+        if active.trailing_sl is None:
+            return active.entry_price
+        return max(active.entry_price, active.trailing_sl)
+    return close
 
 
 def run_strategy_for_pair(
@@ -383,6 +459,8 @@ def run_strategy_for_pair(
     stop_trading = False
     last_row_by_side: dict[str, pd.Series] = {}
     breakout_seen = {"CE": False, "PE": False}
+    blocked_sides = {"CE": False, "PE": False}
+    cooldown_candles = {"CE": 0, "PE": 0}
 
     for candle_time in sorted(by_time):
         side_rows = by_time[candle_time]
@@ -392,21 +470,25 @@ def run_strategy_for_pair(
             active_row = side_rows.get(active.side)
             if active_row is not None and candle_time > active.entry_time:
                 _update_active_trade(active, active_row, config)
-                stop = _active_stop(active, config)
+                should_exit, exit_reason = _exit_signal(active, active_row, config)
                 close = _price(active_row["close"])
-                if close <= stop:
+                if should_exit:
                     trade = _make_trade(
                         pair=pair,
                         active=active,
                         exit_time=candle_time,
-                        exit_price=close,
-                        exit_reason="stop",
+                        exit_price=_exit_price(active, close, exit_reason, config),
+                        exit_reason=exit_reason,
                         loss_count=loss_count,
                         daily_pnl=daily_pnl,
                     )
                     trades.append(trade)
                     loss_count = trade.loss_count_after_trade
                     daily_pnl = trade.daily_pnl_after_trade
+                    if config.block_side_after_pivot_sl and exit_reason == "pivot_close_sl":
+                        blocked_sides[active.side] = True
+                    if exit_reason == "pivot_close_sl" and config.cooldown_candles_after_pivot_sl > 0:
+                        cooldown_candles[active.side] = config.cooldown_candles_after_pivot_sl
                     active = None
                     stop_trading = (
                         loss_count >= config.max_losing_trades_per_day
@@ -421,8 +503,13 @@ def run_strategy_for_pair(
 
         candidates = []
         for side in ("CE", "PE"):
+            if blocked_sides[side]:
+                continue
             row = side_rows.get(side)
             if row is None:
+                continue
+            if cooldown_candles[side] > 0:
+                cooldown_candles[side] -= 1
                 continue
             if config.entry_mode == "retest_only":
                 if breakout_seen[side] and _retest_entry_candidate(row, pivot, config):
@@ -436,6 +523,17 @@ def run_strategy_for_pair(
                         skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
                 elif not breakout_seen[side] and _breakout_candidate(row, pivot):
                     breakout_seen[side] = True
+            elif config.entry_mode == "retest_or_breakout":
+                if _retest_entry_candidate(row, pivot, config):
+                    candidates.append((row["datetime"], side, row))
+                elif config.enable_vacuum_breakout and _entry_candidate(row, pivot, config):
+                    candidates.append((row["datetime"], side, row))
+                elif (
+                    _entry_candidate_before_anti_chase(row, pivot, config)
+                    and not _anti_chase_passes(row, config)
+                ):
+                    if skipped_anti_chase is not None:
+                        skipped_anti_chase.append(_skipped_anti_chase(pair, side, row))
             elif _entry_candidate(row, pivot, config):
                 candidates.append((row["datetime"], side, row))
             elif (
@@ -448,7 +546,7 @@ def run_strategy_for_pair(
         if candidates:
             _, side, row = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
             previous_row = previous_by_time.get(row["datetime"], {}).get(side)
-            active = _new_active_trade(side, row, previous_row, config)
+            active = _new_active_trade(side, row, previous_row, config, pivot)
             breakout_seen = {"CE": False, "PE": False}
 
     if active is not None:

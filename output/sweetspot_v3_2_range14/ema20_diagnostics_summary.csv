@@ -1,0 +1,13 @@
+analysis,bucket,trades,total_pnl
+entry_above_ema20,True,12,107.04999999999995
+entry_above_ema20,False,24,59.59999999999996
+entry_candle_color,green,22,112.39999999999998
+entry_candle_color,red,14,54.24999999999994
+previous_candle_touched_ema20,True,5,106.39999999999999
+previous_candle_touched_ema20,False,31,60.249999999999915
+current_candle_touched_ema20,True,4,55.59999999999998
+current_candle_touched_ema20,False,32,111.04999999999993
+near_ema20_bucket,within 5 pts,4,28.30000000000001
+near_ema20_bucket,within 10 pts,6,110.34999999999997
+near_ema20_bucket,within 15 pts,3,-22.599999999999973
+near_ema20_bucket,beyond 15 pts,23,50.59999999999991
