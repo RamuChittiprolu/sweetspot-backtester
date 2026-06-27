@@ -1,0 +1,36 @@
+data:
+  options_dir: data/raw
+  spot_dir: data/nifty_spot
+  output_dir: output/normal_pivot_breakout_vix_structure_v2
+  candle_minutes: 5
+strategy:
+  name: Sweet Spot v3.2.1 Normal Pivot Breakout + VIX Structure v2
+  strike_step: 50
+  universe:
+    mode: offsets
+    offsets: [0]
+  allowed_option_types: [CE, PE]
+  allowed_setups: [retest_bounce, normal_breakout]
+  max_entry_distance_from_pivot: 20
+  max_entry_candle_range: 13
+  min_entry_body_ratio: 0.35
+  min_entry_close_position: 0.60
+  max_pre_entry_move_from_day_low: 35
+  retest_tolerance: 3
+  min_retest_close_position: 0.60
+  reject_retest_after_strong_red_prev: true
+  strong_red_body_ratio: 0.55
+  trade_start_time: "09:20"
+  trade_end_time: "15:00"
+  squareoff_time: "15:25"
+  ema_period: 20
+  enable_vacuum: false
+  c2c_trigger: 20
+  c2c_exit_mode: close_below_entry
+  trailing_trigger: 40
+  daily_risk:
+    max_pivot_close_sl: 2
+    max_daily_loss: 30
+probability_filter:
+  enabled: false
+  min_probability_20: 0.0

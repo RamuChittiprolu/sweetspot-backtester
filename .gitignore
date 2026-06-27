@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local market data and generated artifacts
+data/raw/
+data/charts/
+data/processed/
+data/nifty_spot/
+data/*.csv
+output/
+
+# Local build/runtime folders
+spreadsheet_build/node_modules/
+
+# Office lock files
+~$*.docx
+~$*.xlsx

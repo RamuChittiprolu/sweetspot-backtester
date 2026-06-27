@@ -1,0 +1,33 @@
+data:
+  options_dir: data/raw
+  spot_dir: data/nifty_spot
+  output_dir: output/recommended_pe_midday
+  candle_minutes: 5
+strategy:
+  name: Sweet Spot v3.2.1 Recommended - PE Midday
+  strike_step: 50
+  universe:
+    mode: offsets
+    offsets: [-50, 0, 50]
+  allowed_option_types: [PE]
+  allowed_setups: [retest_bounce, vacuum_breakout]
+  max_entry_distance_from_pivot: 12
+  max_entry_candle_range: 13
+  retest_tolerance: 3
+  min_retest_close_position: 0.40
+  reject_retest_after_strong_red_prev: true
+  strong_red_body_ratio: 0.55
+  trade_start_time: "11:30"
+  trade_end_time: "14:45"
+  squareoff_time: "15:25"
+  ema_period: 20
+  enable_vacuum: true
+  vacuum_min_body_ratio: 0.55
+  c2c_trigger: 20
+  trailing_trigger: 40
+  daily_risk:
+    max_pivot_close_sl: 2
+    max_daily_loss: 30
+probability_filter:
+  enabled: false
+  min_probability_20: 0.0
