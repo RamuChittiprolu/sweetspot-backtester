@@ -1,0 +1,45 @@
+data:
+  options_dir: data/raw
+  spot_dir: data/nifty_spot
+  output_dir: output/v323_profit_lock_15_continuation_disabled
+  candle_minutes: 5
+strategy:
+  version: "3.2.3"
+  name: Sweet Spot v3.2.3 Profit Lock +15 Continuation Disabled
+  strike_step: 50
+  universe: {mode: offsets, offsets: [0]}
+  allowed_option_types: [CE, PE]
+  enabled_setups: [first_breakout, ignition_reclaim, fresh_reclaim, side_switch]
+  trade_start_time: "09:20"
+  trade_end_time: "15:00"
+  squareoff_time: "15:25"
+  ema_period: 20
+  vix_file: data/INDIA_VIX_5minute_2025-04-01_to_2026-06-26.csv
+  max_entry_distance_from_pivot: 20
+  max_entry_candle_range: 13
+  min_entry_body_ratio: 0.35
+  min_entry_close_position: 0.60
+  max_pre_entry_move_from_day_low: 35
+  strong_body_ratio: 0.50
+  strong_close_position: 0.70
+  reclaim_wait_candles: 2
+  reclaim_max_entry_distance: 30
+  reclaim_max_candle_range: 18
+  max_trades_per_side_per_day: 3
+  enable_ignition_reclaim: true
+  ignition_start_time: "10:00"
+  ignition_max_entry_distance: 30
+  ignition_max_candle_range: 70
+  ignition_min_body_ratio: 0.60
+  ignition_min_close_position: 0.70
+  side_switch_max_entry_distance: 30
+  side_switch_max_candle_range: 18
+  max_side_switches_per_day: 1
+  c2c_trigger: 20
+  c2c_exit_mode: close_below_entry
+  profit_lock_trigger: 20
+  profit_lock_points: 15
+  prev_low_trail_trigger: 30
+  trailing_trigger: 40
+  daily_risk: {max_pivot_close_sl: 4, max_daily_loss: 60}
+probability_filter: {enabled: false, min_probability_20: 0.0}

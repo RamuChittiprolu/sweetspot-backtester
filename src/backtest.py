@@ -120,6 +120,53 @@ def _is_weak_quality(body_ratio: float, close_position: float, config: dict[str,
     return body_ratio < float(strat.get("strong_body_ratio", 0.50)) or close_position < float(strat.get("strong_close_position", 0.70))
 
 
+def _setup_enabled(config: dict[str, Any], setup: str) -> bool:
+    enabled = config["strategy"].get("enabled_setups")
+    return enabled is None or setup in set(enabled)
+
+
+def _vix_allows_setup(
+    config: dict[str, Any],
+    setup: str,
+    vix_status: str,
+    body_ratio: float,
+    close_position: float,
+    close: float,
+    pivot: float,
+    candle_range: float,
+    row: pd.Series,
+    recent_washout: bool,
+) -> bool:
+    strat = config["strategy"]
+    mode = strat.get("vix_filter_mode", "soft")
+    weak = _is_weak_quality(body_ratio, close_position, config)
+    if mode != "strict":
+        return not (vix_status == "SHARP_FALL" and weak)
+
+    if vix_status == "REVIEW":
+        return False
+    if vix_status == "OK":
+        return True
+    if vix_status == "MILD_FALL":
+        if setup in {"first_breakout", "ignition_reclaim"}:
+            return not weak
+        return setup == "ignition_reclaim" and not weak
+    if vix_status == "SHARP_FALL":
+        if setup != "ignition_reclaim":
+            return False
+        return (
+            row["time"] >= _parse_time(strat.get("ignition_start_time", "10:00"))
+            and recent_washout
+            and close > pivot
+            and close > float(row.get("ema", close))
+            and body_ratio >= float(strat.get("sharp_fall_ignition_min_body_ratio", 0.65))
+            and close_position >= float(strat.get("sharp_fall_ignition_min_close_position", 0.75))
+            and close <= pivot + float(strat.get("sharp_fall_ignition_max_entry_distance", 25))
+            and candle_range <= float(strat.get("sharp_fall_ignition_max_candle_range", 60))
+        )
+    return False
+
+
 def _make_signal(
     row: pd.Series,
     setup: str,
@@ -205,6 +252,8 @@ def _v322_signals(
         day_low_so_far = row.get("day_low_so_far", np.nan)
         not_overextended = pd.isna(day_low_so_far) or close - float(day_low_so_far) <= float(strat.get("max_pre_entry_move_from_day_low", 35))
         if (
+            _setup_enabled(config, "first_breakout")
+            and
             side_trades == 0
             and broke_from_below
             and close <= pivot + float(strat.get("max_entry_distance_from_pivot", 20))
@@ -212,7 +261,7 @@ def _v322_signals(
             and body_ratio >= float(strat.get("min_entry_body_ratio", 0.35))
             and close_position >= float(strat.get("min_entry_close_position", 0.60))
             and not_overextended
-            and not (vix_status == "SHARP_FALL" and weak)
+            and _vix_allows_setup(config, "first_breakout", vix_status, body_ratio, close_position, close, pivot, candle_range, row, recent_washout=False)
         ):
             signals.append(_make_signal(row, "first_breakout", 3, pivot, atm, candle_range, None, vix_status, vix_reason))
 
@@ -225,7 +274,8 @@ def _v322_signals(
         # Wide reclaim / ignition candle. This is intentionally separate from the normal
         # anti-chase filter because the candle begins from a washout/base and closes strong.
         if (
-            strat.get("enable_ignition_reclaim", False)
+            _setup_enabled(config, "ignition_reclaim")
+            and strat.get("enable_ignition_reclaim", False)
             and row["time"] >= _parse_time(strat.get("ignition_start_time", "10:00"))
             and recent_washout
             and (closes_above_prev2_high or broke_from_below)
@@ -235,14 +285,15 @@ def _v322_signals(
             and body_ratio >= float(strat.get("ignition_min_body_ratio", 0.60))
             and close_position >= float(strat.get("ignition_min_close_position", 0.70))
             and side_trades < int(strat.get("max_trades_per_side_per_day", 2))
-            and not (vix_status == "SHARP_FALL" and weak)
+            and _vix_allows_setup(config, "ignition_reclaim", vix_status, body_ratio, close_position, close, pivot, candle_range, row, recent_washout)
         ):
             base_low = float(prev5["low"].min())
             signals.append(_make_signal(row, "ignition_reclaim", 1, pivot, atm, candle_range, base_low, vix_status, vix_reason))
 
         # Fresh reclaim after failed/closed prior trade.
         if (
-            previous_exit_ok
+            _setup_enabled(config, "fresh_reclaim")
+            and previous_exit_ok
             and wait_ok
             and state.get("last_exit_side") == side
             and side_trades < int(strat.get("max_trades_per_side_per_day", 2))
@@ -250,37 +301,46 @@ def _v322_signals(
             and close > float(row.get("ema", close))
             and close <= pivot + float(strat.get("reclaim_max_entry_distance", 30))
             and candle_range <= float(strat.get("reclaim_max_candle_range", 18))
-            and not (vix_status == "SHARP_FALL" and weak)
+            and _vix_allows_setup(config, "fresh_reclaim", vix_status, body_ratio, close_position, close, pivot, candle_range, row, recent_washout)
         ):
             base_low = float(prev2["low"].min()) if not prev2.empty else float(row["low"])
             signals.append(_make_signal(row, "fresh_reclaim", 1, pivot, atm, candle_range, base_low, vix_status, vix_reason))
 
         # Continuation/base breakout. No day-low overextension rule; use base-low distance instead.
-        if len(prev3) >= 3:
-            held = bool(((prev3["close"] > pivot) | (prev3["close"] > prev3["ema"])).all())
-            base_high = float(prev3["high"].max())
-            base_low = float(prev3["low"].min())
+        base_candles = int(strat.get("continuation_min_base_candles", 3))
+        prev_base = hist.tail(base_candles)
+        if _setup_enabled(config, "continuation_base_breakout") and len(prev_base) >= base_candles:
+            if strat.get("continuation_hold_mode") == "pivot_and_ema":
+                held = bool(((prev_base["close"] > pivot) & (prev_base["close"] > prev_base["ema"])).all())
+            else:
+                held = bool(((prev_base["close"] > pivot) | (prev_base["close"] > prev_base["ema"])).all())
+            base_high = float(prev_base["high"].max())
+            base_low = float(prev_base["low"].min())
             if (
                 held
                 and close > base_high
                 and close <= pivot + float(strat.get("continuation_max_entry_distance", 40))
                 and candle_range <= float(strat.get("continuation_max_candle_range", 18))
                 and close - base_low <= float(strat.get("continuation_max_distance_from_base_low", 20))
+                and body_ratio >= float(strat.get("continuation_min_body_ratio", 0.0))
+                and close_position >= float(strat.get("continuation_min_close_position", 0.0))
                 and side_trades < int(strat.get("max_trades_per_side_per_day", 2))
-                and not (vix_status == "SHARP_FALL" and weak)
+                and vix_status not in set(strat.get("continuation_skip_vix_statuses", []))
+                and _vix_allows_setup(config, "continuation_base_breakout", vix_status, body_ratio, close_position, close, pivot, candle_range, row, recent_washout)
             ):
                 signals.append(_make_signal(row, "continuation_base_breakout", 2, pivot, atm, candle_range, base_low, vix_status, vix_reason))
 
         # Side switch after prior side exits by SL/C2C.
         if (
-            previous_exit_ok
+            _setup_enabled(config, "side_switch")
+            and previous_exit_ok
             and state.get("last_exit_side") not in {None, side}
             and state.get("side_switches", 0) < int(strat.get("max_side_switches_per_day", 1))
             and closes_above_prev2_high
             and close > float(row.get("ema", close))
             and close <= pivot + float(strat.get("side_switch_max_entry_distance", 30))
             and candle_range <= float(strat.get("side_switch_max_candle_range", 18))
-            and not (vix_status == "SHARP_FALL" and weak)
+            and _vix_allows_setup(config, "side_switch", vix_status, body_ratio, close_position, close, pivot, candle_range, row, recent_washout)
         ):
             base_low = float(prev2["low"].min()) if not prev2.empty else None
             signals.append(_make_signal(row, "side_switch", 4, pivot, atm, candle_range, base_low, vix_status, vix_reason))
@@ -292,12 +352,18 @@ def _exit_trade(signal: Signal, future: pd.DataFrame, config: dict[str, Any]) ->
     strat = config["strategy"]
     c2c_trigger = float(strat.get("c2c_trigger", 20))
     trailing_trigger = float(strat.get("trailing_trigger", 40))
+    profit_lock_points = strat.get("profit_lock_points")
+    profit_lock_trigger = float(strat.get("profit_lock_trigger", c2c_trigger))
+    prev_low_trail_trigger = strat.get("prev_low_trail_trigger")
     squareoff_time = _parse_time(strat.get("squareoff_time", "15:25"))
 
     c2c = False
     trailing = False
     trailing_sl: float | None = None
+    profit_lock_active = False
+    profit_lock_sl: float | None = None
     max_fav = 0.0
+    prev_candle_low: float | None = None
 
     if future.empty:
         return Trade(
@@ -329,10 +395,23 @@ def _exit_trade(signal: Signal, future: pd.DataFrame, config: dict[str, Any]) ->
         max_fav = max(max_fav, high_profit)
         if high_profit >= c2c_trigger:
             c2c = True
+        if profit_lock_points is not None and high_profit >= profit_lock_trigger:
+            profit_lock_active = True
+            profit_lock_sl = max(profit_lock_sl or -float("inf"), signal.entry_price + float(profit_lock_points))
+        if (
+            profit_lock_active
+            and prev_low_trail_trigger is not None
+            and high_profit >= float(prev_low_trail_trigger)
+            and prev_candle_low is not None
+        ):
+            profit_lock_sl = max(profit_lock_sl or -float("inf"), prev_candle_low)
         if high_profit >= trailing_trigger:
             trailing = True
 
         close = float(row["close"])
+        if profit_lock_active and profit_lock_sl is not None and close <= profit_lock_sl:
+            return _make_trade(signal, row, profit_lock_sl, "PROFIT_LOCK", max_fav, c2c, trailing)
+
         base_stop_hit = signal.stop_level is not None and close < float(signal.stop_level)
         pivot_stop_hit = close < signal.pivot and signal.setup != "continuation_base_breakout"
         if pivot_stop_hit or base_stop_hit:
@@ -354,6 +433,7 @@ def _exit_trade(signal: Signal, future: pd.DataFrame, config: dict[str, Any]) ->
 
         if trailing:
             trailing_sl = max(trailing_sl or signal.entry_price, float(row["low"]))
+        prev_candle_low = float(row["low"])
 
     return _make_trade(signal, last_row, float(last_row["close"]), "END_OF_DATA", max_fav, c2c, trailing)
 
@@ -431,7 +511,7 @@ def run_backtest_with_market(
                 continue
             if _daily_guard_hit(daily_pnl, daily_pivot_sl_count, config):
                 continue
-            if config["strategy"].get("version") == "3.2.2":
+            if config["strategy"].get("version") in {"3.2.2", "3.2.3"}:
                 signals = _v322_signals(timestamp, candle_rows, tradable, context, config, state, vix)
             else:
                 signals = find_signals(candle_rows, context, config)
@@ -449,7 +529,7 @@ def run_backtest_with_market(
             daily_pnl += trade.pnl
             if trade.exit_reason in {"PIVOT_CLOSE_SL", "BASE_LOW_SL"}:
                 daily_pivot_sl_count += 1
-            if config["strategy"].get("version") == "3.2.2":
+            if config["strategy"].get("version") in {"3.2.2", "3.2.3"}:
                 previous_side = state.get("last_exit_side")
                 if previous_side is not None and previous_side != trade.option_type and trade.setup == "side_switch":
                     state["side_switches"] += 1
